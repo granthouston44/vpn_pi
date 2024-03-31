@@ -1,0 +1,165 @@
+---
+- name: Set up NordVPN on Raspberry Pi 4
+  hosts: raspberrypi
+  become: yes
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install required packages
+      apt:
+        name:
+          - dnsmasq
+          - hostapd
+          - iptables-persistent
+        state: present
+
+    - name: Download and install NordVPN
+      shell: |
+        wget https://repo.nordvpn.com/deb/nordvpn/debian/pool/main/nordvpn-release_1.0.0_all.deb
+        sudo dpkg -i nordvpn-release_1.0.0_all.deb
+        sudo apt update
+        sudo apt install nordvpn
+
+    - name: Configure NordVPN
+      shell: |
+        nordvpn whitelist add subnet 192.168.4.0/24
+        nordvpn whitelist add subnet yourlocalhostIP/32
+
+    - name: Copy update whitelist script
+      copy:
+        src: update_whitelist.sh
+        dest: /usr/local/bin/update_whitelist.sh
+        mode: '0755'
+
+    - name: Set up cronjob for updating whitelist
+      cron:
+        name: Update NordVPN whitelist
+        minute: "*/10"
+        job: /usr/local/bin/update_whitelist.sh
+
+    - name: Configure IP forwarding
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        state: present
+
+    - name: Configure iptables rules
+      iptables:
+        chain: "{{ item.chain }}"
+        jump: "{{ item.jump }}"
+        in_interface: "{{ item.in_interface | default(omit) }}"
+        out_interface: "{{ item.out_interface | default(omit) }}"
+        source: "{{ item.source | default(omit) }}"
+        destination_port: "{{ item.destination_port | default(omit) }}"
+        protocol: "{{ item.protocol | default(omit) }}"
+        ctstate: "{{ item.ctstate | default(omit) }}"
+      with_items:
+        - { chain: FORWARD, in_interface: wlan0, out_interface: nordlynx, jump: ACCEPT }
+        - { chain: FORWARD, in_interface: nordlynx, out_interface: wlan0, ctstate: ESTABLISHED,RELATED, jump: ACCEPT }
+        - { chain: FORWARD, in_interface: wlan1, out_interface: nordlynx, jump: REJECT }
+        - { chain: FORWARD, in_interface: nordlynx, out_interface: wlan1, jump: REJECT }
+        - { chain: POSTROUTING, out_interface: nordlynx, jump: MASQUERADE, table: nat }
+        - { chain: FORWARD, in_interface: nordlynx, out_interface: wlan0, ctstate: RELATED,ESTABLISHED, jump: ACCEPT }
+        - { chain: FORWARD, in_interface: wlan0, out_interface: nordlynx, jump: ACCEPT }
+        - { chain: POSTROUTING, out_interface: wlan1, jump: MASQUERADE, table: nat }
+        - { chain: FORWARD, in_interface: wlan1, out_interface: wlan0, ctstate: RELATED,ESTABLISHED, jump: ACCEPT }
+        - { chain: FORWARD, in_interface: wlan0, out_interface: wlan1, jump: ACCEPT }
+        - { chain: POSTROUTING, source: 172.22.0.0/16, out_interface: "!br-f46f3eccc69d", jump: MASQUERADE, table: nat }
+        - { chain: INPUT, in_interface: wlan1, protocol: tcp, destination_port: 8081, jump: ACCEPT }
+        - { chain: INPUT, in_interface: wlan1, protocol: tcp, destination_port: 80, jump: ACCEPT }
+        - { chain: INPUT, in_interface: wlan1, protocol: tcp, destination_port: 443, jump: ACCEPT }
+
+    - name: Save iptables rules
+      command: iptables-save > /etc/iptables/rules.v4
+
+    - name: Configure hostapd
+      copy:
+        content: |
+          interface=wlan0
+          driver=nl80211
+          ssid=SimpleAP
+          hw_mode=g
+          channel=6
+          wmm_enabled=0
+          macaddr_acl=0
+          auth_algs=1
+          wpa=2
+          wpa_passphrase=SimplePassword
+          wpa_key_mgmt=WPA-PSK
+          rsn_pairwise=CCMP
+        dest: /etc/hostapd/hostapd.conf
+
+    - name: Configure dhcpcd
+      copy:
+        content: |
+          duid
+          persistent
+          vendorclassid
+          option domain_name_servers, domain_name, domain_search
+          option classless_static_routes
+          option interface_mtu
+          option host_name
+          option rapid_commit
+          require dhcp_server_identifier
+          slaac private
+
+          interface wlan0
+          static ip_address=192.168.4.1/24
+          nohook wpa_supplicant
+        dest: /etc/dhcpcd.conf
+
+    - name: Configure dnsmasq
+      copy:
+        content: |
+          interface=wlan0
+          bind-interfaces
+          server=8.8.8.8
+          domain-needed
+          bogus-priv
+          dhcp-range=192.168.4.2,192.168.4.20,255.255.255.0,24h
+          log-queries
+          log-dhcp
+          log-facility=/var/log/dnsmasq.log
+        dest: /etc/dnsmasq.conf
+
+    - name: Configure hostapd defaults
+      copy:
+        content: |
+          DAEMON_CONF="/etc/hostapd/hostapd.conf"
+        dest: /etc/default/hostapd
+
+        - name: Bring up wlan0 interface
+      command: ip link set wlan0 up
+
+    - name: Configure service dependencies
+      lineinfile:
+        path: "/etc/systemd/system/{{ item }}.service"
+        regexp: "^After="
+        line: "After=network.target nordvpnd.service"
+      with_items:
+        - hostapd
+        - dnsmasq
+
+    - name: Configure dhcpcd dependency
+      lineinfile:
+        path: /etc/systemd/system/dhcpcd.service
+        regexp: "^After="
+        line: "After=network.target nordvpnd.service hostapd.service"
+
+    - name: Reload systemd configuration
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable and start services
+      service:
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+      with_items:
+        - nordvpnd
+        - hostapd
+        - dnsmasq
+        - dhcpcd

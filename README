@@ -1,0 +1,71 @@
+# NordVPN Setup on Raspberry Pi 4
+
+This Ansible playbook automates the installation and configuration of NordVPN on a Raspberry Pi 4, setting up the built-in WiFi module (wlan0) as the VPN access point and keeping a WIFI dongle (wlan1) for internet-facing access and SSH, motion, and nginx Docker servers.
+
+## Prerequisites
+- Ansible installed on your control machine
+- SSH access to your Raspberry Pi 4
+
+## Running the Playbook
+Clone this repository or copy the following files to your local machine:
+
+- nordvpn_setup.yml (Ansible playbook)
+- inventory (Ansible inventory file)
+- update_whitelist.sh (Script to update NordVPN whitelist)
+
+Update the inventory file with the IP address or hostname of your Raspberry Pi 4:
+
+```
+[raspberrypi]
+192.168.1.100  # Replace with your Raspberry Pi 4's IP address or hostname
+```
+
+Update the nordvpn_setup.yml to use your own localhost IP that you intend to SSH into your pi with:
+```
+    - name: Configure NordVPN
+      shell: |
+        nordvpn whitelist add subnet 192.168.4.0/24
+        nordvpn whitelist add subnet yourlocalhostIP/32
+```
+
+Open the update_whitelist.sh script and replace <your_domain> with your actual domain name.
+
+Run the playbook using the following command:
+
+```
+ansible-playbook -i inventory nordvpn_setup.yml
+```
+
+If you encounter any SSH connection issues, you can try adding the -k flag to prompt for the SSH password:
+
+```
+ansible-playbook -i inventory nordvpn_setup.yml -k
+```
+
+The playbook will install and configure NordVPN, set up the necessary network configurations, and start the required services.
+
+After the playbook execution is complete, your Raspberry Pi 4 should have NordVPN installed and configured, with the built-in WiFi module (wlan0) acting as the VPN access point and the Edimax dongle (wlan1) used for internet-facing access and specific services.
+
+### What the Playbook Does
+- Updates the apt cache and installs required packages (dnsmasq, hostapd, iptables-persistent).
+- Downloads and installs NordVPN.
+- Configures NordVPN to whitelist specific subnets.
+- Enables IP forwarding.
+- Configures iptables rules for proper routing and access.
+- Saves the iptables rules.
+- Configures hostapd, dhcpcd, and dnsmasq with the provided configurations.
+- Brings up the wlan0 interface.
+- Configures service dependencies to ensure proper startup order after a reboot.
+- Enables and starts the necessary services (nordvpnd, hostapd, dnsmasq, dhcpcd).
+- Copies the update_whitelist.sh script from your local machine to the Raspberry Pi.
+- Sets up a cronjob to run the update_whitelist.sh script every 10 minutes.
+
+## Accessing the Motion Server
+The playbook includes an iptables rule that allows incoming traffic on port 8081 (assuming your motion server is running on this port) from the wlan1 interface. This rule ensures that incoming traffic to the motion server is allowed even when the VPN is active.
+
+Additionally, the playbook copies the update_whitelist.sh script to the Raspberry Pi and sets up a cronjob to run it every 10 minutes. This script retrieves the public IP address associated with your domain and updates the NordVPN whitelist accordingly. This ensures that the motion server remains accessible when accessing it from outside your local network.
+
+### Customization
+If you need to modify the update_whitelist.sh script or any other configuration files, make sure to update them on your local machine before running the Ansible playbook. The playbook will copy the updated files to the Raspberry Pi during execution.
+
+If you have any further questions or encounter issues, please refer to the playbook code and the README for more details.
